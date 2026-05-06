@@ -25,6 +25,7 @@ ANTHROPIC_API_KEY=your_anthropic_api_key_here
 ANTHROPIC_MODEL=claude-opus-4-5
 OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL=gpt-5.1
+ANALYSIS_PASSES=3
 API_KEY=your_api_secret_key_here
 PORT=8000
 ENVIRONMENT=development
@@ -57,6 +58,8 @@ OPENAI_MODEL=gpt-5.1
 
 Keep `API_KEY` configured either way; it protects the public `/analyze` endpoint.
 
+`ANALYSIS_PASSES` controls conservative revalidation. The default is `3`, meaning the API analyzes and verifies the image three times, then returns a port as occupied only if every pass confirms it.
+
 ## Health Check
 
 ```bash
@@ -84,6 +87,8 @@ curl -X POST http://localhost:8000/analyze \
 ## Occupancy Criteria
 
 A port is counted as occupied only when a connector plug is physically seated inside that numbered ATP port and an external connector body with an associated cable protrudes from the adapter. Green SC/APC adapters, green dust caps, green port faces, shadows, black internal plastic, and cables passing near the port are not counted as occupied by themselves. Technician test leads, optical power meter connectors, or loose connectors near the box are reported in `observaciones` but are not counted unless visibly inserted into one of the numbered ports. When the image is ambiguous, the analyzer is calibrated to prefer marking the port as available and lowering confidence.
+
+For troubleshooting, `POST /analyze/debug` returns the per-port evidence and verification results from each pass. Use this endpoint during calibration, and keep consuming `POST /analyze` in production integrations.
 
 ## Full Example Request
 

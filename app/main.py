@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -150,3 +151,20 @@ async def analyze(
         device_info=device_info,
         confidence=confidence,
     )
+
+
+@app.post("/analyze/debug", dependencies=[Depends(verify_api_key)])
+async def analyze_debug(
+    request_body: AnalyzeRequest,
+    request: Request,
+    analyzer: ATPAnalyzer = Depends(get_analyzer),
+) -> dict[str, Any]:
+    image_url = str(request_body.image_url)
+    request.state.image_url = image_url
+    debug_result = await analyzer.analyze_debug(image_url)
+    return {
+        "success": True,
+        "image_url": image_url,
+        "analyzed_at": utc_now(),
+        "debug": debug_result,
+    }

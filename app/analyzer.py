@@ -176,6 +176,37 @@ class ATPAnalyzer:
     async def analyze(self, image_url: str) -> ClaudeAnalysis:
         image_bytes, media_type = await self.fetch_image(image_url)
         encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+        analyses = [
+            await self.analyze_encoded_once(encoded_image, media_type)
+            for _ in range(self.settings.analysis_passes)
+        ]
+        return self.build_consensus_analysis(analyses)
+
+    async def analyze_debug(self, image_url: str) -> dict[str, Any]:
+        image_bytes, media_type = await self.fetch_image(image_url)
+        encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+        passes = [
+            await self.analyze_encoded_debug_once(encoded_image, media_type)
+            for _ in range(self.settings.analysis_passes)
+        ]
+        final = self.build_consensus_analysis(
+            [ClaudeAnalysis.model_validate(item["final_analysis"]) for item in passes]
+        )
+        return {
+            "analysis_passes": self.settings.analysis_passes,
+            "consensus_rule": (
+                "A port is returned occupied only if every pass confirms it after "
+                "skeptical verification."
+            ),
+            "passes": passes,
+            "final_consensus": final.model_dump(mode="json"),
+        }
+
+    async def analyze_encoded_once(
+        self,
+        encoded_image: str,
+        media_type: str,
+    ) -> ClaudeAnalysis:
         if self.settings.llm_provider == "openai":
             initial_analysis = await self.call_openai_audit(encoded_image, media_type)
             return await self.verify_openai_occupied_ports(
@@ -193,6 +224,46 @@ class ATPAnalyzer:
             media_type,
             initial_analysis,
         )
+
+    async def analyze_encoded_debug_once(
+        self,
+        encoded_image: str,
+        media_type: str,
+    ) -> dict[str, Any]:
+        if self.settings.llm_provider == "openai":
+            audit = await self.call_openai_audit_raw(encoded_image, media_type)
+            initial_analysis = audit.to_claude_analysis()
+            verification = await self.verify_openai_occupied_ports_raw(
+                encoded_image,
+                media_type,
+                initial_analysis,
+            )
+            final_analysis = self.apply_occupancy_verification(
+                initial_analysis,
+                verification,
+            )
+        else:
+            audit = await self.call_claude_audit_raw_with_retry(
+                encoded_image,
+                media_type,
+            )
+            initial_analysis = audit.to_claude_analysis()
+            verification = await self.verify_claude_occupied_ports_raw(
+                encoded_image,
+                media_type,
+                initial_analysis,
+            )
+            final_analysis = self.apply_occupancy_verification(
+                initial_analysis,
+                verification,
+            )
+
+        return {
+            "audit": audit.model_dump(mode="json"),
+            "initial_analysis": initial_analysis.model_dump(mode="json"),
+            "verification": verification.model_dump(mode="json"),
+            "final_analysis": final_analysis.model_dump(mode="json"),
+        }
 
     async def fetch_image(self, image_url: str) -> tuple[bytes, str]:
         try:
@@ -262,13 +333,23 @@ class ATPAnalyzer:
         encoded_image: str,
         media_type: str,
     ) -> ClaudeAnalysis:
+        audit = await self.call_claude_audit_raw_with_retry(encoded_image, media_type)
+        analysis = audit.to_claude_analysis()
+        self.validate_port_logic(analysis.model_dump())
+        return analysis
+
+    async def call_claude_audit_raw_with_retry(
+        self,
+        encoded_image: str,
+        media_type: str,
+    ) -> PortEvidenceAudit:
         first_response = await self.call_claude(
             encoded_image,
             media_type,
             EVIDENCE_AUDIT_PROMPT,
         )
         try:
-            return self.parse_evidence_audit_response(first_response)
+            return self.parse_evidence_audit_raw_response(first_response)
         except (json.JSONDecodeError, ValidationError, ValueError) as first_error:
             retry_response = await self.call_claude(
                 encoded_image,
@@ -280,7 +361,7 @@ class ATPAnalyzer:
                 ),
             )
             try:
-                return self.parse_evidence_audit_response(retry_response)
+                return self.parse_evidence_audit_raw_response(retry_response)
             except (json.JSONDecodeError, ValidationError, ValueError) as retry_error:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -299,14 +380,25 @@ class ATPAnalyzer:
         if not analysis.puertos_ocupados:
             return analysis
 
+        verification = await self.verify_claude_occupied_ports_raw(
+            encoded_image,
+            media_type,
+            analysis,
+        )
+        return self.apply_occupancy_verification(analysis, verification)
+
+    async def verify_claude_occupied_ports_raw(
+        self,
+        encoded_image: str,
+        media_type: str,
+        analysis: ClaudeAnalysis,
+    ) -> OccupancyVerification:
         prompt = build_verification_prompt(analysis.puertos_ocupados)
         response = await self.call_claude(encoded_image, media_type, prompt)
         try:
-            verification = self.parse_verification_response(response)
+            return self.parse_verification_response(response)
         except (json.JSONDecodeError, ValidationError, ValueError):
-            return self.lower_confidence(analysis)
-
-        return self.apply_occupancy_verification(analysis, verification)
+            return OccupancyVerification(verifications=[])
 
     async def call_claude(
         self,
@@ -464,6 +556,16 @@ class ATPAnalyzer:
         encoded_image: str,
         media_type: str,
     ) -> ClaudeAnalysis:
+        audit = await self.call_openai_audit_raw(encoded_image, media_type)
+        analysis = audit.to_claude_analysis()
+        self.validate_port_logic(analysis.model_dump())
+        return analysis
+
+    async def call_openai_audit_raw(
+        self,
+        encoded_image: str,
+        media_type: str,
+    ) -> PortEvidenceAudit:
         if self.openai_client is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -565,7 +667,7 @@ class ATPAnalyzer:
             )
 
         try:
-            return self.parse_evidence_audit_response(output_text)
+            return self.parse_evidence_audit_raw_response(output_text)
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -580,6 +682,21 @@ class ATPAnalyzer:
     ) -> ClaudeAnalysis:
         if not analysis.puertos_ocupados:
             return analysis
+        verification = await self.verify_openai_occupied_ports_raw(
+            encoded_image,
+            media_type,
+            analysis,
+        )
+        return self.apply_occupancy_verification(analysis, verification)
+
+    async def verify_openai_occupied_ports_raw(
+        self,
+        encoded_image: str,
+        media_type: str,
+        analysis: ClaudeAnalysis,
+    ) -> OccupancyVerification:
+        if not analysis.puertos_ocupados:
+            return OccupancyVerification(verifications=[])
         if self.openai_client is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -654,14 +771,12 @@ class ATPAnalyzer:
 
         output_text = getattr(response, "output_text", None)
         if not output_text:
-            return self.lower_confidence(analysis)
+            return OccupancyVerification(verifications=[])
 
         try:
-            verification = self.parse_verification_response(output_text)
+            return self.parse_verification_response(output_text)
         except (json.JSONDecodeError, ValidationError, ValueError):
-            return self.lower_confidence(analysis)
-
-        return self.apply_occupancy_verification(analysis, verification)
+            return OccupancyVerification(verifications=[])
 
     def parse_claude_response(self, response_text: str) -> ClaudeAnalysis:
         cleaned = self.strip_markdown_fences(response_text)
@@ -674,6 +789,15 @@ class ATPAnalyzer:
         return analysis
 
     def parse_evidence_audit_response(self, response_text: str) -> ClaudeAnalysis:
+        audit = self.parse_evidence_audit_raw_response(response_text)
+        analysis = audit.to_claude_analysis()
+        self.validate_port_logic(analysis.model_dump())
+        return analysis
+
+    def parse_evidence_audit_raw_response(
+        self,
+        response_text: str,
+    ) -> PortEvidenceAudit:
         cleaned = self.strip_markdown_fences(response_text)
         data = json.loads(cleaned)
         if not isinstance(data, dict):
@@ -690,9 +814,7 @@ class ATPAnalyzer:
                     "external_connector_body_visible evidence"
                 )
 
-        analysis = audit.to_claude_analysis()
-        self.validate_port_logic(analysis.model_dump())
-        return analysis
+        return audit
 
     def parse_verification_response(self, response_text: str) -> OccupancyVerification:
         cleaned = self.strip_markdown_fences(response_text)
@@ -743,6 +865,43 @@ class ATPAnalyzer:
             codigo_dispositivo=analysis.codigo_dispositivo,
             ubicacion=analysis.ubicacion,
             observaciones=analysis.observaciones,
+            confidence=confidence,
+        )
+
+    @staticmethod
+    def build_consensus_analysis(analyses: list[ClaudeAnalysis]) -> ClaudeAnalysis:
+        if not analyses:
+            raise ValueError("At least one analysis pass is required")
+
+        occupied_sets = [set(analysis.puertos_ocupados) for analysis in analyses]
+        consensus_occupied = sorted(set.intersection(*occupied_sets))
+        consensus_available = [
+            port for port in range(1, 9) if port not in consensus_occupied
+        ]
+        first = analyses[0]
+        any_disagreement = len({tuple(sorted(item)) for item in occupied_sets}) > 1
+        confidence = first.confidence
+        if any_disagreement:
+            confidence = "low"
+        elif any(analysis.confidence != "high" for analysis in analyses):
+            confidence = "medium"
+
+        observations = first.observaciones
+        if any_disagreement:
+            observations = (
+                f"{observations or ''} Consensus warning: analysis passes disagreed; "
+                "only ports confirmed in every pass were returned as occupied."
+            ).strip()
+
+        return ClaudeAnalysis(
+            total_puertos=8,
+            total_ocupados=len(consensus_occupied),
+            puertos_ocupados=consensus_occupied,
+            total_disponibles=len(consensus_available),
+            puertos_disponibles=consensus_available,
+            codigo_dispositivo=first.codigo_dispositivo,
+            ubicacion=first.ubicacion,
+            observaciones=observations,
             confidence=confidence,
         )
 

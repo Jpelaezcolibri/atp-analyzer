@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     anthropic_model: str = Field("claude-opus-4-5", alias="ANTHROPIC_MODEL")
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
     openai_model: str = Field("gpt-5.1", alias="OPENAI_MODEL")
-    analysis_passes: int = Field(3, ge=1, le=5, alias="ANALYSIS_PASSES")
+    analysis_passes: int = Field(2, ge=1, le=5, alias="ANALYSIS_PASSES")
     api_key: str = Field(..., alias="API_KEY")
     port: int = Field(8000, alias="PORT")
     environment: str = Field("development", alias="ENVIRONMENT")

@@ -83,7 +83,7 @@ curl -X POST http://localhost:8000/analyze \
 
 ## Occupancy Criteria
 
-A port is counted as occupied only when a connector plug is physically seated inside that numbered ATP port and a cable/plug protrudes from the adapter. Green SC/APC adapters, green dust caps, or green port faces are not counted as occupied by themselves. Technician test leads, optical power meter connectors, or loose connectors near the box are reported in `observaciones` but are not counted unless visibly inserted into one of the numbered ports.
+A port is counted as occupied only when a connector plug is physically seated inside that numbered ATP port and an external connector body with an associated cable protrudes from the adapter. Green SC/APC adapters, green dust caps, green port faces, shadows, black internal plastic, and cables passing near the port are not counted as occupied by themselves. Technician test leads, optical power meter connectors, or loose connectors near the box are reported in `observaciones` but are not counted unless visibly inserted into one of the numbered ports. When the image is ambiguous, the analyzer is calibrated to prefer marking the port as available and lowering confidence.
 
 ## Full Example Request
 

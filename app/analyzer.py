@@ -54,10 +54,17 @@ Rules:
 - Do NOT count the green rectangular SC/APC adapters, dust caps, or green port faces as occupied by themselves
 - A port is occupied only when a connector plug is seated inside that exact numbered port
 - Green color alone is not evidence of occupancy; many available ATP ports have green adapters
+- A row of 8 green rectangular tabs/adapters usually means the ports are present, not occupied
+- Dark holes, shadows, black internal plastic, labels, screws, separators, and gaps under the adapters are not connectors
+- Do not infer occupancy from a cable passing near, behind, below, or beside a port
+- Count a port as occupied only if you can see an external connector body protruding from that numbered adapter and visually associated cable
+- If you cannot clearly see the external connector body seated in the exact port, classify that port as available
+- Prefer false negatives over false positives: uncertain ports must be marked available with confidence lowered
 - Cables, connectors, or test leads held by a technician or connected to an optical power meter do not count unless visibly inserted into a numbered port on the ATP box
 - If a connector appears near the box but is outside the port, in the technician's hand, or connected only to test equipment, do not count it as occupied
 - If a port is partially hidden and you cannot verify a seated connector, mark it available and lower confidence
 - In observaciones, mention technician test activity separately from permanent occupied ports
+- For images with an optical power meter, the connector inserted into the meter is not an ATP box port connection
 - If image quality is too low to be certain, set confidence to 'low'
 - Return ONLY the JSON object, no markdown fences"""
 

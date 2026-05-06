@@ -93,7 +93,11 @@ Critical rules:
 - Do not infer occupancy from identical-looking green adapters.
 - If you cannot point to the external connector body protruding from that exact numbered adapter, mark it available.
 - Prefer false negatives over false positives.
-- A connector plugged into the orange meter is not plugged into the ATP port.
+- A connector plugged into the orange meter is not automatically an ATP port connection.
+- However, if a test jumper visibly originates from a numbered ATP port and continues to the orange optical power meter, that numbered ATP port DOES count as occupied.
+- For technician testing, count the ATP-side inserted connector, not the meter-side connector.
+- Do not mark a contiguous block of ports occupied just because the adapter row is green. Each occupied port must have its own visible plug/cable leaving that exact numbered adapter.
+- In this ATP box style, the strongest occupancy evidence is a cable or connector body exiting downward from the lower edge of the numbered adapter. If only the top green face is visible, mark available.
 
 Respond ONLY with valid JSON in this exact structure:
 {
@@ -123,15 +127,20 @@ The previous analysis may contain false positives. Review the image again and ve
 For each candidate port, answer whether it is truly occupied under this strict rule:
 - confirmed_occupied is true ONLY if a physical external connector body is clearly seated in that exact numbered adapter and protrudes outward/downward from the port.
 - visible_connector_body must be true only when the connector body itself is visible, not just a green adapter face.
+- If a technician test jumper is visibly inserted into the ATP-side numbered port and routes to the orange optical power meter, confirmed_occupied must be true for that ATP port.
 
 Reject these as NOT occupied:
 - green rectangular SC/APC adapter row
 - green port faces, flaps, caps, dust covers
 - dark holes, black internal plastic, shadows, separators, screws
 - cables passing nearby, behind, below, or beside the port
-- connector plugged into the orange optical power meter
+- connector plugged into the orange optical power meter when the ATP-side port insertion is not visible
 - connector held by the technician
 - anything ambiguous or partially occluded
+
+Important ATP test-photo rule:
+- The meter-side plug itself is not a port, but the ATP-side port where the test jumper is inserted is occupied.
+- If the visible cable leaves the numbered adapter and goes toward the meter, count that adapter port as occupied.
 
 If unsure, set confirmed_occupied=false and visible_connector_body=false.
 

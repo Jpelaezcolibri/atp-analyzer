@@ -98,6 +98,10 @@ Critical rules:
 - For technician testing, count the ATP-side inserted connector, not the meter-side connector.
 - Do not mark a contiguous block of ports occupied just because the adapter row is green. Each occupied port must have its own visible plug/cable leaving that exact numbered adapter.
 - In this ATP box style, the strongest occupancy evidence is a cable or connector body exiting downward from the lower edge of the numbered adapter. If only the top green face is visible, mark available.
+- Many ATP boxes have green hinged shutters or rectangular hanging adapter flaps below each port. These flaps can look like connector bodies, but they are part of the empty adapter. Do NOT count a hanging green flap as occupied unless a separate fiber cable is clearly attached to it and can be traced away from that exact port.
+- Empty ports may show vertical green plastic pieces below the adapter row. These are not SC/APC connector plugs by themselves.
+- For each occupied decision, require two visible facts together: (1) a plug body distinct from the built-in adapter/shutter, and (2) an individual cable physically attached to that plug.
+- If several adjacent ports appear occupied only because they have identical green hanging shapes, they are probably adapter shutters, not inserted connectors. Mark them available unless their individual cables are clearly visible.
 
 Respond ONLY with valid JSON in this exact structure:
 {
@@ -141,6 +145,7 @@ Reject these as NOT occupied:
 Important ATP test-photo rule:
 - The meter-side plug itself is not a port, but the ATP-side port where the test jumper is inserted is occupied.
 - If the visible cable leaves the numbered adapter and goes toward the meter, count that adapter port as occupied.
+- Do not count ports 3, 4, 5, or 6 as occupied merely because they have the same vertical green shutter shape as their neighbors. Count them only if their own cable can be visually traced from that exact port.
 
 If unsure, set confirmed_occupied=false and visible_connector_body=false.
 

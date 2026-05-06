@@ -28,8 +28,9 @@ SYSTEM_PROMPT = (
 USER_PROMPT = """Analyze this ATP fiber optic distribution box image.
 The box has 8 ports numbered 1 through 8 from left to right
 (numbers are printed above or below each port).
-An OCCUPIED port has a green SC/APC fiber optic connector inserted.
-An AVAILABLE port is an empty slot (no connector).
+An OCCUPIED port has a fiber optic connector physically inserted into that
+numbered port adapter, with a cable/plug protruding from the port.
+An AVAILABLE port is an empty adapter/slot with no connector inserted.
 
 Respond ONLY with this exact JSON structure, no other text:
 {
@@ -49,6 +50,14 @@ Rules:
 - total_ocupados = length of puertos_ocupados
 - total_disponibles = length of puertos_disponibles
 - total_puertos is always 8
+- Evaluate each port individually from left to right using the printed numbers 1 through 8
+- Do NOT count the green rectangular SC/APC adapters, dust caps, or green port faces as occupied by themselves
+- A port is occupied only when a connector plug is seated inside that exact numbered port
+- Green color alone is not evidence of occupancy; many available ATP ports have green adapters
+- Cables, connectors, or test leads held by a technician or connected to an optical power meter do not count unless visibly inserted into a numbered port on the ATP box
+- If a connector appears near the box but is outside the port, in the technician's hand, or connected only to test equipment, do not count it as occupied
+- If a port is partially hidden and you cannot verify a seated connector, mark it available and lower confidence
+- In observaciones, mention technician test activity separately from permanent occupied ports
 - If image quality is too low to be certain, set confidence to 'low'
 - Return ONLY the JSON object, no markdown fences"""
 

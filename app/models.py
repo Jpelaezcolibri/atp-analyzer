@@ -155,6 +155,24 @@ class PortEvidenceAudit(BaseModel):
         )
 
 
+class PortVerification(BaseModel):
+    puerto: PortNumber
+    confirmed_occupied: bool
+    visible_connector_body: bool
+    reason: str
+
+
+class OccupancyVerification(BaseModel):
+    verifications: list[PortVerification]
+
+    @model_validator(mode="after")
+    def validate_verifications(self) -> "OccupancyVerification":
+        port_numbers = [verification.puerto for verification in self.verifications]
+        if len(set(port_numbers)) != len(port_numbers):
+            raise ValueError("verification ports cannot contain duplicates")
+        return self
+
+
 class AnalyzeResponse(BaseModel):
     success: Literal[True] = True
     image_url: str

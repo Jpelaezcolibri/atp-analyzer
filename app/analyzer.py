@@ -13,7 +13,7 @@ from openai import AsyncOpenAI
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.models import ClaudeAnalysis, PortEvidenceAudit
+from app.models import ClaudeAnalysis, OccupancyVerification, PortEvidenceAudit
 
 
 SYSTEM_PROMPT = (
@@ -114,6 +114,41 @@ Respond ONLY with valid JSON in this exact structure:
 
 Return exactly 8 items in puertos, one for each port 1 through 8. A port can be "occupied" only when evidencia is "external_connector_body_visible"; otherwise estado must be "available". Return ONLY JSON, no markdown."""
 
+
+def build_verification_prompt(candidate_ports: list[int]) -> str:
+    return f"""You are a skeptical verifier for ATP fiber optic port occupancy.
+
+The previous analysis may contain false positives. Review the image again and verify ONLY these candidate occupied ports: {candidate_ports}.
+
+For each candidate port, answer whether it is truly occupied under this strict rule:
+- confirmed_occupied is true ONLY if a physical external connector body is clearly seated in that exact numbered adapter and protrudes outward/downward from the port.
+- visible_connector_body must be true only when the connector body itself is visible, not just a green adapter face.
+
+Reject these as NOT occupied:
+- green rectangular SC/APC adapter row
+- green port faces, flaps, caps, dust covers
+- dark holes, black internal plastic, shadows, separators, screws
+- cables passing nearby, behind, below, or beside the port
+- connector plugged into the orange optical power meter
+- connector held by the technician
+- anything ambiguous or partially occluded
+
+If unsure, set confirmed_occupied=false and visible_connector_body=false.
+
+Respond ONLY with valid JSON:
+{{
+  "verifications": [
+    {{
+      "puerto": <candidate port number>,
+      "confirmed_occupied": true | false,
+      "visible_connector_body": true | false,
+      "reason": "<short reason>"
+    }}
+  ]
+}}
+
+Return one verification item for every candidate port in {candidate_ports}. No markdown."""
+
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 ACCEPTED_IMAGE_TYPES = {
     "image/jpeg",
@@ -142,8 +177,22 @@ class ATPAnalyzer:
         image_bytes, media_type = await self.fetch_image(image_url)
         encoded_image = base64.b64encode(image_bytes).decode("utf-8")
         if self.settings.llm_provider == "openai":
-            return await self.call_openai_audit(encoded_image, media_type)
-        return await self.call_claude_audit_with_retry(encoded_image, media_type)
+            initial_analysis = await self.call_openai_audit(encoded_image, media_type)
+            return await self.verify_openai_occupied_ports(
+                encoded_image,
+                media_type,
+                initial_analysis,
+            )
+
+        initial_analysis = await self.call_claude_audit_with_retry(
+            encoded_image,
+            media_type,
+        )
+        return await self.verify_claude_occupied_ports(
+            encoded_image,
+            media_type,
+            initial_analysis,
+        )
 
     async def fetch_image(self, image_url: str) -> tuple[bytes, str]:
         try:
@@ -240,6 +289,24 @@ class ATPAnalyzer:
                         f"First error: {first_error}. Retry error: {retry_error}"
                     ),
                 ) from retry_error
+
+    async def verify_claude_occupied_ports(
+        self,
+        encoded_image: str,
+        media_type: str,
+        analysis: ClaudeAnalysis,
+    ) -> ClaudeAnalysis:
+        if not analysis.puertos_ocupados:
+            return analysis
+
+        prompt = build_verification_prompt(analysis.puertos_ocupados)
+        response = await self.call_claude(encoded_image, media_type, prompt)
+        try:
+            verification = self.parse_verification_response(response)
+        except (json.JSONDecodeError, ValidationError, ValueError):
+            return self.lower_confidence(analysis)
+
+        return self.apply_occupancy_verification(analysis, verification)
 
     async def call_claude(
         self,
@@ -505,6 +572,97 @@ class ATPAnalyzer:
                 detail=f"OpenAI evidence audit failed validation: {exc}",
             ) from exc
 
+    async def verify_openai_occupied_ports(
+        self,
+        encoded_image: str,
+        media_type: str,
+        analysis: ClaudeAnalysis,
+    ) -> ClaudeAnalysis:
+        if not analysis.puertos_ocupados:
+            return analysis
+        if self.openai_client is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="OpenAI client is not configured",
+            )
+
+        prompt = build_verification_prompt(analysis.puertos_ocupados)
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "verifications": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "puerto": {"type": "integer", "minimum": 1, "maximum": 8},
+                            "confirmed_occupied": {"type": "boolean"},
+                            "visible_connector_body": {"type": "boolean"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": [
+                            "puerto",
+                            "confirmed_occupied",
+                            "visible_connector_body",
+                            "reason",
+                        ],
+                    },
+                }
+            },
+            "required": ["verifications"],
+        }
+
+        try:
+            response = await self.openai_client.responses.create(
+                model=self.settings.openai_model,
+                instructions=SYSTEM_PROMPT,
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": prompt},
+                            {
+                                "type": "input_image",
+                                "image_url": (
+                                    f"data:{media_type};base64,{encoded_image}"
+                                ),
+                                "detail": "high",
+                            },
+                        ],
+                    }
+                ],
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "atp_occupancy_verification",
+                        "strict": True,
+                        "schema": schema,
+                    }
+                },
+            )
+        except (
+            OpenAIAPIError,
+            OpenAIAPIStatusError,
+            OpenAIAPITimeoutError,
+        ) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"OpenAI API error: {exc}",
+            ) from exc
+
+        output_text = getattr(response, "output_text", None)
+        if not output_text:
+            return self.lower_confidence(analysis)
+
+        try:
+            verification = self.parse_verification_response(output_text)
+        except (json.JSONDecodeError, ValidationError, ValueError):
+            return self.lower_confidence(analysis)
+
+        return self.apply_occupancy_verification(analysis, verification)
+
     def parse_claude_response(self, response_text: str) -> ClaudeAnalysis:
         cleaned = self.strip_markdown_fences(response_text)
         data = json.loads(cleaned)
@@ -535,6 +693,58 @@ class ATPAnalyzer:
         analysis = audit.to_claude_analysis()
         self.validate_port_logic(analysis.model_dump())
         return analysis
+
+    def parse_verification_response(self, response_text: str) -> OccupancyVerification:
+        cleaned = self.strip_markdown_fences(response_text)
+        data = json.loads(cleaned)
+        if not isinstance(data, dict):
+            raise ValueError("Occupancy verification JSON must be an object")
+
+        return OccupancyVerification.model_validate(data)
+
+    @staticmethod
+    def apply_occupancy_verification(
+        analysis: ClaudeAnalysis,
+        verification: OccupancyVerification,
+    ) -> ClaudeAnalysis:
+        confirmed = {
+            item.puerto
+            for item in verification.verifications
+            if item.confirmed_occupied and item.visible_connector_body
+        }
+        occupied = [port for port in analysis.puertos_ocupados if port in confirmed]
+        available = [port for port in range(1, 9) if port not in occupied]
+        rejected_count = len(analysis.puertos_ocupados) - len(occupied)
+        confidence = analysis.confidence
+        if rejected_count > 0 and confidence == "high":
+            confidence = "medium"
+
+        return ClaudeAnalysis(
+            total_puertos=8,
+            total_ocupados=len(occupied),
+            puertos_ocupados=occupied,
+            total_disponibles=len(available),
+            puertos_disponibles=available,
+            codigo_dispositivo=analysis.codigo_dispositivo,
+            ubicacion=analysis.ubicacion,
+            observaciones=analysis.observaciones,
+            confidence=confidence,
+        )
+
+    @staticmethod
+    def lower_confidence(analysis: ClaudeAnalysis) -> ClaudeAnalysis:
+        confidence = "medium" if analysis.confidence == "high" else analysis.confidence
+        return ClaudeAnalysis(
+            total_puertos=analysis.total_puertos,
+            total_ocupados=analysis.total_ocupados,
+            puertos_ocupados=analysis.puertos_ocupados,
+            total_disponibles=analysis.total_disponibles,
+            puertos_disponibles=analysis.puertos_disponibles,
+            codigo_dispositivo=analysis.codigo_dispositivo,
+            ubicacion=analysis.ubicacion,
+            observaciones=analysis.observaciones,
+            confidence=confidence,
+        )
 
     @staticmethod
     def strip_markdown_fences(text: str) -> str:

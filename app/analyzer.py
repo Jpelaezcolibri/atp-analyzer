@@ -13,7 +13,7 @@ from openai import AsyncOpenAI
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.models import ClaudeAnalysis
+from app.models import ClaudeAnalysis, PortEvidenceAudit
 
 
 SYSTEM_PROMPT = (
@@ -74,6 +74,46 @@ STRICT_RETRY_PROMPT = (
     "comments, prose, or trailing commas."
 )
 
+EVIDENCE_AUDIT_PROMPT = """Analyze this ATP fiber optic distribution box image with a conservative anti-hallucination checklist.
+
+The box has exactly 8 numbered ports from left to right. Your task is NOT to count green parts. Your task is to inspect each numbered adapter and decide whether there is visible evidence of an external connector body seated in that exact port.
+
+Definitions:
+- external_connector_body_visible: a real connector plug body is visibly inserted in the numbered adapter, protruding outward/downward, with a cable visually associated to that plug.
+- empty_green_adapter_only: the port shows only the green rectangular SC/APC adapter, face, flap, or cap. This is AVAILABLE.
+- shadow_or_internal_plastic_only: the port shows dark gaps, black plastic, shadow, separator, screw, or internal slot material. This is AVAILABLE.
+- nearby_cable_not_inserted: a cable passes near/behind/below/beside the port but no connector body is visibly seated in that exact adapter. This is AVAILABLE.
+- technician_or_meter_connector_only: the visible connector is held by the technician or connected to the orange optical power meter, not seated in a numbered ATP port. This is AVAILABLE for the ATP port.
+- occluded_or_uncertain: the exact port is hidden or ambiguous. This is AVAILABLE and confidence should be medium or low.
+
+Critical rules:
+- The horizontal row of 8 green rectangles is usually the adapter row, not 8 occupied ports.
+- Green color is never enough to mark occupied.
+- Do not infer occupancy from cable proximity.
+- Do not infer occupancy from identical-looking green adapters.
+- If you cannot point to the external connector body protruding from that exact numbered adapter, mark it available.
+- Prefer false negatives over false positives.
+- A connector plugged into the orange meter is not plugged into the ATP port.
+
+Respond ONLY with valid JSON in this exact structure:
+{
+  "total_puertos": 8,
+  "puertos": [
+    {
+      "puerto": 1,
+      "estado": "occupied" | "available",
+      "evidencia": "external_connector_body_visible" | "empty_green_adapter_only" | "shadow_or_internal_plastic_only" | "nearby_cable_not_inserted" | "technician_or_meter_connector_only" | "occluded_or_uncertain",
+      "razon": "<short visual reason>"
+    }
+  ],
+  "codigo_dispositivo": "<text from device label or null>",
+  "ubicacion": "<location text from label or null>",
+  "observaciones": "<technician activity, visible damage, special notes, or null>",
+  "confidence": "high" | "medium" | "low"
+}
+
+Return exactly 8 items in puertos, one for each port 1 through 8. A port can be "occupied" only when evidencia is "external_connector_body_visible"; otherwise estado must be "available". Return ONLY JSON, no markdown."""
+
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 ACCEPTED_IMAGE_TYPES = {
     "image/jpeg",
@@ -102,8 +142,8 @@ class ATPAnalyzer:
         image_bytes, media_type = await self.fetch_image(image_url)
         encoded_image = base64.b64encode(image_bytes).decode("utf-8")
         if self.settings.llm_provider == "openai":
-            return await self.call_openai(encoded_image, media_type)
-        return await self.call_claude_with_retry(encoded_image, media_type)
+            return await self.call_openai_audit(encoded_image, media_type)
+        return await self.call_claude_audit_with_retry(encoded_image, media_type)
 
     async def fetch_image(self, image_url: str) -> tuple[bytes, str]:
         try:
@@ -164,6 +204,39 @@ class ATPAnalyzer:
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=(
                         "Claude response could not be parsed after retry. "
+                        f"First error: {first_error}. Retry error: {retry_error}"
+                    ),
+                ) from retry_error
+
+    async def call_claude_audit_with_retry(
+        self,
+        encoded_image: str,
+        media_type: str,
+    ) -> ClaudeAnalysis:
+        first_response = await self.call_claude(
+            encoded_image,
+            media_type,
+            EVIDENCE_AUDIT_PROMPT,
+        )
+        try:
+            return self.parse_evidence_audit_response(first_response)
+        except (json.JSONDecodeError, ValidationError, ValueError) as first_error:
+            retry_response = await self.call_claude(
+                encoded_image,
+                media_type,
+                (
+                    f"{EVIDENCE_AUDIT_PROMPT}\n\nYour previous response failed "
+                    "validation. Return exactly one valid JSON object. Remember: "
+                    "occupied is allowed only with external_connector_body_visible."
+                ),
+            )
+            try:
+                return self.parse_evidence_audit_response(retry_response)
+            except (json.JSONDecodeError, ValidationError, ValueError) as retry_error:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=(
+                        "Claude evidence audit could not be parsed after retry. "
                         f"First error: {first_error}. Retry error: {retry_error}"
                     ),
                 ) from retry_error
@@ -319,6 +392,119 @@ class ATPAnalyzer:
                 detail=f"OpenAI structured response failed validation: {exc}",
             ) from exc
 
+    async def call_openai_audit(
+        self,
+        encoded_image: str,
+        media_type: str,
+    ) -> ClaudeAnalysis:
+        if self.openai_client is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="OpenAI client is not configured",
+            )
+
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "total_puertos": {"type": "integer", "enum": [8]},
+                "puertos": {
+                    "type": "array",
+                    "minItems": 8,
+                    "maxItems": 8,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "puerto": {"type": "integer", "minimum": 1, "maximum": 8},
+                            "estado": {
+                                "type": "string",
+                                "enum": ["occupied", "available"],
+                            },
+                            "evidencia": {
+                                "type": "string",
+                                "enum": [
+                                    "external_connector_body_visible",
+                                    "empty_green_adapter_only",
+                                    "shadow_or_internal_plastic_only",
+                                    "nearby_cable_not_inserted",
+                                    "technician_or_meter_connector_only",
+                                    "occluded_or_uncertain",
+                                ],
+                            },
+                            "razon": {"type": "string"},
+                        },
+                        "required": ["puerto", "estado", "evidencia", "razon"],
+                    },
+                },
+                "codigo_dispositivo": {"type": ["string", "null"]},
+                "ubicacion": {"type": ["string", "null"]},
+                "observaciones": {"type": ["string", "null"]},
+                "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+            },
+            "required": [
+                "total_puertos",
+                "puertos",
+                "codigo_dispositivo",
+                "ubicacion",
+                "observaciones",
+                "confidence",
+            ],
+        }
+
+        try:
+            response = await self.openai_client.responses.create(
+                model=self.settings.openai_model,
+                instructions=SYSTEM_PROMPT,
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": EVIDENCE_AUDIT_PROMPT},
+                            {
+                                "type": "input_image",
+                                "image_url": (
+                                    f"data:{media_type};base64,{encoded_image}"
+                                ),
+                                "detail": "high",
+                            },
+                        ],
+                    }
+                ],
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "atp_port_evidence_audit",
+                        "strict": True,
+                        "schema": schema,
+                    }
+                },
+            )
+        except (
+            OpenAIAPIError,
+            OpenAIAPIStatusError,
+            OpenAIAPITimeoutError,
+        ) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"OpenAI API error: {exc}",
+            ) from exc
+
+        output_text = getattr(response, "output_text", None)
+        if not output_text:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="OpenAI response did not contain text content",
+            )
+
+        try:
+            return self.parse_evidence_audit_response(output_text)
+        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"OpenAI evidence audit failed validation: {exc}",
+            ) from exc
+
     def parse_claude_response(self, response_text: str) -> ClaudeAnalysis:
         cleaned = self.strip_markdown_fences(response_text)
         data = json.loads(cleaned)
@@ -327,6 +513,27 @@ class ATPAnalyzer:
 
         analysis = ClaudeAnalysis.model_validate(data)
         self.validate_port_logic(data)
+        return analysis
+
+    def parse_evidence_audit_response(self, response_text: str) -> ClaudeAnalysis:
+        cleaned = self.strip_markdown_fences(response_text)
+        data = json.loads(cleaned)
+        if not isinstance(data, dict):
+            raise ValueError("Evidence audit JSON must be an object")
+
+        audit = PortEvidenceAudit.model_validate(data)
+        for port in audit.puertos:
+            if (
+                port.estado == "occupied"
+                and port.evidencia != "external_connector_body_visible"
+            ):
+                raise ValueError(
+                    "Evidence audit validation failed: occupied ports must have "
+                    "external_connector_body_visible evidence"
+                )
+
+        analysis = audit.to_claude_analysis()
+        self.validate_port_logic(analysis.model_dump())
         return analysis
 
     @staticmethod

@@ -92,6 +92,69 @@ class ClaudeAnalysis(BaseModel):
         return result, device_info, self.confidence
 
 
+class PortEvidence(BaseModel):
+    puerto: PortNumber
+    estado: Literal["occupied", "available"]
+    evidencia: Literal[
+        "external_connector_body_visible",
+        "empty_green_adapter_only",
+        "shadow_or_internal_plastic_only",
+        "nearby_cable_not_inserted",
+        "technician_or_meter_connector_only",
+        "occluded_or_uncertain",
+    ]
+    razon: str
+
+
+class PortEvidenceAudit(BaseModel):
+    total_puertos: int = Field(8)
+    puertos: list[PortEvidence]
+    codigo_dispositivo: str | None
+    ubicacion: str | None
+    observaciones: str | None
+    confidence: Confidence
+
+    @model_validator(mode="after")
+    def validate_audit(self) -> "PortEvidenceAudit":
+        port_numbers = [port.puerto for port in self.puertos]
+        if self.total_puertos != 8:
+            raise ValueError("total_puertos must be 8")
+        if sorted(port_numbers) != list(range(1, 9)):
+            raise ValueError("audit must include exactly ports 1..8")
+        if len(set(port_numbers)) != 8:
+            raise ValueError("audit ports cannot contain duplicates")
+        return self
+
+    def to_claude_analysis(self) -> ClaudeAnalysis:
+        occupied = sorted(
+            port.puerto
+            for port in self.puertos
+            if (
+                port.estado == "occupied"
+                and port.evidencia == "external_connector_body_visible"
+            )
+        )
+        available = [port for port in range(1, 9) if port not in occupied]
+        confidence: Confidence = self.confidence
+        uncertain_count = sum(
+            1 for port in self.puertos if port.evidencia == "occluded_or_uncertain"
+        )
+        if uncertain_count > 0 and confidence == "high":
+            confidence = "medium"
+
+        return ClaudeAnalysis(
+            total_puertos=8,
+            total_ocupados=len(occupied),
+            puertos_ocupados=occupied,
+            total_disponibles=len(available),
+            puertos_disponibles=available,
+            codigo_dispositivo=self.codigo_dispositivo,
+            ubicacion=self.ubicacion,
+            observaciones=self.observaciones,
+            confidence=confidence,
+        )
+
+
 class AnalyzeResponse(BaseModel):
     success: Literal[True] = True
     image_url: str

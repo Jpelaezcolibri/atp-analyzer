@@ -26,6 +26,7 @@ ANTHROPIC_MODEL=claude-opus-4-5
 OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL=gpt-5.1
 ANALYSIS_PASSES=2
+PRODUCTION_ANALYSIS_PASSES=1
 API_KEY=your_api_secret_key_here
 PORT=8000
 ENVIRONMENT=development
@@ -58,7 +59,7 @@ OPENAI_MODEL=gpt-5.1
 
 Keep `API_KEY` configured either way; it protects the public `/analyze` endpoint.
 
-`ANALYSIS_PASSES` controls conservative revalidation. The default is `2`, meaning the API analyzes and verifies the image twice, then returns a port as occupied only if every pass confirms it. Use `1` for faster tests and `3` only when calibrating difficult images.
+`PRODUCTION_ANALYSIS_PASSES` controls `POST /analyze` and defaults to `1` for Lambda-friendly latency. `ANALYSIS_PASSES` controls `POST /analyze/debug` and defaults to `2` for deeper calibration runs.
 
 ## Health Check
 

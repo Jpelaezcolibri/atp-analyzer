@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
     openai_model: str = Field("gpt-5.1", alias="OPENAI_MODEL")
     analysis_passes: int = Field(2, ge=1, le=5, alias="ANALYSIS_PASSES")
+    production_analysis_passes: int = Field(
+        1,
+        ge=1,
+        le=2,
+        alias="PRODUCTION_ANALYSIS_PASSES",
+    )
     api_key: str = Field(..., alias="API_KEY")
     port: int = Field(8000, alias="PORT")
     environment: str = Field("development", alias="ENVIRONMENT")

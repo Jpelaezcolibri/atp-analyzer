@@ -218,7 +218,7 @@ class ATPAnalyzer:
                 encoded_zoom,
                 cropped_media_type,
             )
-            for _ in range(self.settings.analysis_passes)
+            for _ in range(self.settings.production_analysis_passes)
         ]
         return self.build_consensus_analysis(analyses)
 

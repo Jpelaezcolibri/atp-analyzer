@@ -78,6 +78,13 @@ EVIDENCE_AUDIT_PROMPT = """Analyze this ATP fiber optic distribution box image w
 
 The box has exactly 8 numbered ports from left to right. Your task is NOT to count green parts. Your task is to inspect each numbered adapter and decide whether there is visible evidence of an external connector body seated in that exact port.
 
+Numbering procedure:
+- First identify the printed port numbers on the box, even if they are faint, embossed, or printed above the green adapter row.
+- Only after locating the printed numbers, map each visible connector to the nearest printed port number.
+- Never assume that the leftmost visible connector is port 1 unless the printed numbering confirms it.
+- If the image framing cuts off part of the row or the numbering starts later than expected, still trust the printed labels over visual position alone.
+- If a technician jumper is inserted, assign it to the printed port number directly above or below that exact adapter, not to the nearest occupied cluster.
+
 Definitions:
 - external_connector_body_visible: a real connector plug body is visibly inserted in the numbered adapter, protruding outward/downward, with a cable visually associated to that plug.
 - empty_green_adapter_only: the port shows only the green rectangular SC/APC adapter, face, flap, or cap. This is AVAILABLE.
@@ -96,6 +103,8 @@ Critical rules:
 - A connector plugged into the orange meter is not automatically an ATP port connection.
 - However, if a test jumper visibly originates from a numbered ATP port and continues to the orange optical power meter, that numbered ATP port DOES count as occupied.
 - For technician testing, count the ATP-side inserted connector, not the meter-side connector.
+- Do not infer port numbers from connector order alone. Port numbering must come from the printed labels on the ATP housing.
+- Faint embossed numbers above the adapter row take priority over where the connector cluster begins.
 - Do not mark a contiguous block of ports occupied just because the adapter row is green. Each occupied port must have its own visible plug/cable leaving that exact numbered adapter.
 - In this ATP box style, the strongest occupancy evidence is a cable or connector body exiting downward from the lower edge of the numbered adapter. If only the top green face is visible, mark available.
 - Many ATP boxes have green hinged shutters or rectangular hanging adapter flaps below each port. These flaps can look like connector bodies, but they are part of the empty adapter. Do NOT count a hanging green flap as occupied unless a separate fiber cable is clearly attached to it and can be traced away from that exact port.
@@ -132,6 +141,7 @@ For each candidate port, answer whether it is truly occupied under this strict r
 - confirmed_occupied is true ONLY if a physical external connector body is clearly seated in that exact numbered adapter and protrudes outward/downward from the port.
 - visible_connector_body must be true only when the connector body itself is visible, not just a green adapter face.
 - If a technician test jumper is visibly inserted into the ATP-side numbered port and routes to the orange optical power meter, confirmed_occupied must be true for that ATP port.
+- Verify the printed port number for each candidate before confirming it. Do not confirm a port if the visible connector actually aligns with a different printed number.
 
 Reject these as NOT occupied:
 - green rectangular SC/APC adapter row
@@ -146,6 +156,7 @@ Important ATP test-photo rule:
 - The meter-side plug itself is not a port, but the ATP-side port where the test jumper is inserted is occupied.
 - If the visible cable leaves the numbered adapter and goes toward the meter, count that adapter port as occupied.
 - Do not count ports 3, 4, 5, or 6 as occupied merely because they have the same vertical green shutter shape as their neighbors. Count them only if their own cable can be visually traced from that exact port.
+- If the printed labels indicate the technician jumper is in port 5, do not relabel it as port 4 just because it is the fourth occupied-looking connector from the left.
 
 If unsure, set confirmed_occupied=false and visible_connector_body=false.
 

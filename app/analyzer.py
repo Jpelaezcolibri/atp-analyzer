@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import re
 from typing import Any
@@ -10,6 +11,7 @@ from openai import APIError as OpenAIAPIError
 from openai import APIStatusError as OpenAIAPIStatusError
 from openai import APITimeoutError as OpenAIAPITimeoutError
 from openai import AsyncOpenAI
+from PIL import Image
 from pydantic import ValidationError
 
 from app.config import Settings
@@ -77,6 +79,9 @@ STRICT_RETRY_PROMPT = (
 EVIDENCE_AUDIT_PROMPT = """Analyze this ATP fiber optic distribution box image with a conservative anti-hallucination checklist.
 
 The box has exactly 8 numbered ports from left to right. Your task is NOT to count green parts. Your task is to inspect each numbered adapter and decide whether there is visible evidence of an external connector body seated in that exact port.
+You will receive two images:
+- Image 1: a zoomed crop focused on the ATP port row. Use this as the primary source for occupancy.
+- Image 2: the full original photo. Use this for label text, technician context, and anything outside the crop.
 
 Numbering procedure:
 - First identify the printed port numbers on the box, even if they are faint, embossed, or printed above the green adapter row.
@@ -136,6 +141,9 @@ def build_verification_prompt(candidate_ports: list[int]) -> str:
     return f"""You are a skeptical verifier for ATP fiber optic port occupancy.
 
 The previous analysis may contain false positives. Review the image again and verify ONLY these candidate occupied ports: {candidate_ports}.
+You will receive two images:
+- Image 1: zoomed crop of the ATP port row. Use this as the primary source for connector verification.
+- Image 2: full original photo. Use it only as supporting context.
 
 For each candidate port, answer whether it is truly occupied under this strict rule:
 - confirmed_occupied is true ONLY if a physical external connector body is clearly seated in that exact numbered adapter and protrudes outward/downward from the port.
@@ -200,18 +208,32 @@ class ATPAnalyzer:
 
     async def analyze(self, image_url: str) -> ClaudeAnalysis:
         image_bytes, media_type = await self.fetch_image(image_url)
+        cropped_bytes, cropped_media_type = self.create_port_zoom(image_bytes, media_type)
         encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+        encoded_zoom = base64.b64encode(cropped_bytes).decode("utf-8")
         analyses = [
-            await self.analyze_encoded_once(encoded_image, media_type)
+            await self.analyze_encoded_once(
+                encoded_image,
+                media_type,
+                encoded_zoom,
+                cropped_media_type,
+            )
             for _ in range(self.settings.analysis_passes)
         ]
         return self.build_consensus_analysis(analyses)
 
     async def analyze_debug(self, image_url: str) -> dict[str, Any]:
         image_bytes, media_type = await self.fetch_image(image_url)
+        cropped_bytes, cropped_media_type = self.create_port_zoom(image_bytes, media_type)
         encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+        encoded_zoom = base64.b64encode(cropped_bytes).decode("utf-8")
         passes = [
-            await self.analyze_encoded_debug_once(encoded_image, media_type)
+            await self.analyze_encoded_debug_once(
+                encoded_image,
+                media_type,
+                encoded_zoom,
+                cropped_media_type,
+            )
             for _ in range(self.settings.analysis_passes)
         ]
         final = self.build_consensus_analysis(
@@ -231,22 +253,35 @@ class ATPAnalyzer:
         self,
         encoded_image: str,
         media_type: str,
+        encoded_zoom: str,
+        zoom_media_type: str,
     ) -> ClaudeAnalysis:
         if self.settings.llm_provider == "openai":
-            initial_analysis = await self.call_openai_audit(encoded_image, media_type)
+            initial_analysis = await self.call_openai_audit(
+                encoded_image,
+                media_type,
+                encoded_zoom,
+                zoom_media_type,
+            )
             return await self.verify_openai_occupied_ports(
                 encoded_image,
                 media_type,
+                encoded_zoom,
+                zoom_media_type,
                 initial_analysis,
             )
 
         initial_analysis = await self.call_claude_audit_with_retry(
             encoded_image,
             media_type,
+            encoded_zoom,
+            zoom_media_type,
         )
         return await self.verify_claude_occupied_ports(
             encoded_image,
             media_type,
+            encoded_zoom,
+            zoom_media_type,
             initial_analysis,
         )
 
@@ -254,13 +289,22 @@ class ATPAnalyzer:
         self,
         encoded_image: str,
         media_type: str,
+        encoded_zoom: str,
+        zoom_media_type: str,
     ) -> dict[str, Any]:
         if self.settings.llm_provider == "openai":
-            audit = await self.call_openai_audit_raw(encoded_image, media_type)
+            audit = await self.call_openai_audit_raw(
+                encoded_image,
+                media_type,
+                encoded_zoom,
+                zoom_media_type,
+            )
             initial_analysis = audit.to_claude_analysis()
             verification = await self.verify_openai_occupied_ports_raw(
                 encoded_image,
                 media_type,
+                encoded_zoom,
+                zoom_media_type,
                 initial_analysis,
             )
             final_analysis = self.apply_occupancy_verification(
@@ -271,11 +315,15 @@ class ATPAnalyzer:
             audit = await self.call_claude_audit_raw_with_retry(
                 encoded_image,
                 media_type,
+                encoded_zoom,
+                zoom_media_type,
             )
             initial_analysis = audit.to_claude_analysis()
             verification = await self.verify_claude_occupied_ports_raw(
                 encoded_image,
                 media_type,
+                encoded_zoom,
+                zoom_media_type,
                 initial_analysis,
             )
             final_analysis = self.apply_occupancy_verification(
@@ -284,11 +332,38 @@ class ATPAnalyzer:
             )
 
         return {
+            "zoom_used": True,
             "audit": audit.model_dump(mode="json"),
             "initial_analysis": initial_analysis.model_dump(mode="json"),
             "verification": verification.model_dump(mode="json"),
             "final_analysis": final_analysis.model_dump(mode="json"),
         }
+
+    @staticmethod
+    def create_port_zoom(image_bytes: bytes, media_type: str) -> tuple[bytes, str]:
+        try:
+            image = Image.open(io.BytesIO(image_bytes))
+            image.load()
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unable to process image for zoom analysis: {exc}",
+            ) from exc
+
+        width, height = image.size
+        left = int(width * 0.30)
+        top = int(height * 0.12)
+        right = int(width * 0.98)
+        bottom = int(height * 0.62)
+
+        cropped = image.crop((left, top, right, bottom))
+        resized = cropped.resize((cropped.width * 2, cropped.height * 2))
+
+        output = io.BytesIO()
+        output_format = "PNG" if media_type == "image/png" else "JPEG"
+        save_image = resized.convert("RGB") if output_format == "JPEG" else resized
+        save_image.save(output, format=output_format, quality=95)
+        return output.getvalue(), "image/png" if output_format == "PNG" else "image/jpeg"
 
     async def fetch_image(self, image_url: str) -> tuple[bytes, str]:
         try:
@@ -357,8 +432,15 @@ class ATPAnalyzer:
         self,
         encoded_image: str,
         media_type: str,
+        encoded_zoom: str,
+        zoom_media_type: str,
     ) -> ClaudeAnalysis:
-        audit = await self.call_claude_audit_raw_with_retry(encoded_image, media_type)
+        audit = await self.call_claude_audit_raw_with_retry(
+            encoded_image,
+            media_type,
+            encoded_zoom,
+            zoom_media_type,
+        )
         analysis = audit.to_claude_analysis()
         self.validate_port_logic(analysis.model_dump())
         return analysis
@@ -367,10 +449,14 @@ class ATPAnalyzer:
         self,
         encoded_image: str,
         media_type: str,
+        encoded_zoom: str,
+        zoom_media_type: str,
     ) -> PortEvidenceAudit:
         first_response = await self.call_claude(
             encoded_image,
             media_type,
+            encoded_zoom,
+            zoom_media_type,
             EVIDENCE_AUDIT_PROMPT,
         )
         try:
@@ -379,6 +465,8 @@ class ATPAnalyzer:
             retry_response = await self.call_claude(
                 encoded_image,
                 media_type,
+                encoded_zoom,
+                zoom_media_type,
                 (
                     f"{EVIDENCE_AUDIT_PROMPT}\n\nYour previous response failed "
                     "validation. Return exactly one valid JSON object. Remember: "
@@ -400,6 +488,8 @@ class ATPAnalyzer:
         self,
         encoded_image: str,
         media_type: str,
+        encoded_zoom: str,
+        zoom_media_type: str,
         analysis: ClaudeAnalysis,
     ) -> ClaudeAnalysis:
         if not analysis.puertos_ocupados:
@@ -408,6 +498,8 @@ class ATPAnalyzer:
         verification = await self.verify_claude_occupied_ports_raw(
             encoded_image,
             media_type,
+            encoded_zoom,
+            zoom_media_type,
             analysis,
         )
         return self.apply_occupancy_verification(analysis, verification)
@@ -416,10 +508,18 @@ class ATPAnalyzer:
         self,
         encoded_image: str,
         media_type: str,
+        encoded_zoom: str,
+        zoom_media_type: str,
         analysis: ClaudeAnalysis,
     ) -> OccupancyVerification:
         prompt = build_verification_prompt(analysis.puertos_ocupados)
-        response = await self.call_claude(encoded_image, media_type, prompt)
+        response = await self.call_claude(
+            encoded_image,
+            media_type,
+            encoded_zoom,
+            zoom_media_type,
+            prompt,
+        )
         try:
             return self.parse_verification_response(response)
         except (json.JSONDecodeError, ValidationError, ValueError):
@@ -429,6 +529,8 @@ class ATPAnalyzer:
         self,
         encoded_image: str,
         media_type: str,
+        encoded_zoom: str,
+        zoom_media_type: str,
         prompt: str,
     ) -> str:
         if self.anthropic_client is None:
@@ -447,6 +549,14 @@ class ATPAnalyzer:
                     {
                         "role": "user",
                         "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": zoom_media_type,
+                                    "data": encoded_zoom,
+                                },
+                            },
                             {
                                 "type": "image",
                                 "source": {
@@ -580,8 +690,15 @@ class ATPAnalyzer:
         self,
         encoded_image: str,
         media_type: str,
+        encoded_zoom: str,
+        zoom_media_type: str,
     ) -> ClaudeAnalysis:
-        audit = await self.call_openai_audit_raw(encoded_image, media_type)
+        audit = await self.call_openai_audit_raw(
+            encoded_image,
+            media_type,
+            encoded_zoom,
+            zoom_media_type,
+        )
         analysis = audit.to_claude_analysis()
         self.validate_port_logic(analysis.model_dump())
         return analysis
@@ -590,6 +707,8 @@ class ATPAnalyzer:
         self,
         encoded_image: str,
         media_type: str,
+        encoded_zoom: str,
+        zoom_media_type: str,
     ) -> PortEvidenceAudit:
         if self.openai_client is None:
             raise HTTPException(
@@ -658,6 +777,13 @@ class ATPAnalyzer:
                             {
                                 "type": "input_image",
                                 "image_url": (
+                                    f"data:{zoom_media_type};base64,{encoded_zoom}"
+                                ),
+                                "detail": "high",
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": (
                                     f"data:{media_type};base64,{encoded_image}"
                                 ),
                                 "detail": "high",
@@ -703,6 +829,8 @@ class ATPAnalyzer:
         self,
         encoded_image: str,
         media_type: str,
+        encoded_zoom: str,
+        zoom_media_type: str,
         analysis: ClaudeAnalysis,
     ) -> ClaudeAnalysis:
         if not analysis.puertos_ocupados:
@@ -710,6 +838,8 @@ class ATPAnalyzer:
         verification = await self.verify_openai_occupied_ports_raw(
             encoded_image,
             media_type,
+            encoded_zoom,
+            zoom_media_type,
             analysis,
         )
         return self.apply_occupancy_verification(analysis, verification)
@@ -718,6 +848,8 @@ class ATPAnalyzer:
         self,
         encoded_image: str,
         media_type: str,
+        encoded_zoom: str,
+        zoom_media_type: str,
         analysis: ClaudeAnalysis,
     ) -> OccupancyVerification:
         if not analysis.puertos_ocupados:
@@ -765,6 +897,13 @@ class ATPAnalyzer:
                         "role": "user",
                         "content": [
                             {"type": "input_text", "text": prompt},
+                            {
+                                "type": "input_image",
+                                "image_url": (
+                                    f"data:{zoom_media_type};base64,{encoded_zoom}"
+                                ),
+                                "detail": "high",
+                            },
                             {
                                 "type": "input_image",
                                 "image_url": (

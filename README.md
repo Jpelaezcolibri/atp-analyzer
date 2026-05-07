@@ -25,6 +25,8 @@ ANTHROPIC_API_KEY=your_anthropic_api_key_here
 ANTHROPIC_MODEL=claude-opus-4-5
 OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL=gpt-5.1
+SECONDARY_LLM_PROVIDER=none
+SECONDARY_REVIEW_ON_LOW_CONFIDENCE_ONLY=true
 ANALYSIS_PASSES=2
 PRODUCTION_ANALYSIS_PASSES=1
 API_KEY=your_api_secret_key_here
@@ -60,6 +62,8 @@ OPENAI_MODEL=gpt-5.1
 Keep `API_KEY` configured either way; it protects the public `/analyze` endpoint.
 
 `PRODUCTION_ANALYSIS_PASSES` controls `POST /analyze` and defaults to `1` for Lambda-friendly latency. `ANALYSIS_PASSES` controls `POST /analyze/debug` and defaults to `2` for deeper calibration runs.
+
+`SECONDARY_LLM_PROVIDER` can be set to `anthropic` or `openai` to enable an optional second-opinion reviewer. `SECONDARY_REVIEW_ON_LOW_CONFIDENCE_ONLY=true` keeps the latency impact lower by only invoking that second provider when the first result is not high confidence.
 
 ## Health Check
 

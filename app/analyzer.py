@@ -15,7 +15,7 @@ from PIL import Image
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.models import ClaudeAnalysis, OccupancyVerification, PortEvidenceAudit
+from app.models import ClaudeAnalysis, Confidence, OccupancyVerification, PortEvidenceAudit
 
 
 SYSTEM_PROMPT = (
@@ -217,10 +217,18 @@ class ATPAnalyzer:
                 media_type,
                 encoded_zoom,
                 cropped_media_type,
+                self.settings.llm_provider,
             )
             for _ in range(self.settings.production_analysis_passes)
         ]
-        return self.build_consensus_analysis(analyses)
+        primary = self.build_consensus_analysis(analyses)
+        return await self.apply_secondary_review_if_needed(
+            primary,
+            encoded_image,
+            media_type,
+            encoded_zoom,
+            cropped_media_type,
+        )
 
     async def analyze_debug(self, image_url: str) -> dict[str, Any]:
         image_bytes, media_type = await self.fetch_image(image_url)
@@ -255,8 +263,9 @@ class ATPAnalyzer:
         media_type: str,
         encoded_zoom: str,
         zoom_media_type: str,
+        provider: str,
     ) -> ClaudeAnalysis:
-        if self.settings.llm_provider == "openai":
+        if provider == "openai":
             initial_analysis = await self.call_openai_audit(
                 encoded_image,
                 media_type,
@@ -284,6 +293,32 @@ class ATPAnalyzer:
             zoom_media_type,
             initial_analysis,
         )
+
+    async def apply_secondary_review_if_needed(
+        self,
+        primary: ClaudeAnalysis,
+        encoded_image: str,
+        media_type: str,
+        encoded_zoom: str,
+        zoom_media_type: str,
+    ) -> ClaudeAnalysis:
+        secondary_provider = self.settings.secondary_llm_provider
+        if secondary_provider == "none" or secondary_provider == self.settings.llm_provider:
+            return primary
+        if (
+            self.settings.secondary_review_on_low_confidence_only
+            and primary.confidence == "high"
+        ):
+            return primary
+
+        secondary = await self.analyze_encoded_once(
+            encoded_image,
+            media_type,
+            encoded_zoom,
+            zoom_media_type,
+            secondary_provider,
+        )
+        return self.combine_primary_and_secondary(primary, secondary)
 
     async def analyze_encoded_debug_once(
         self,
@@ -1065,6 +1100,42 @@ class ATPAnalyzer:
             puertos_disponibles=consensus_available,
             codigo_dispositivo=first.codigo_dispositivo,
             ubicacion=first.ubicacion,
+            observaciones=observations,
+            confidence=confidence,
+        )
+
+    @staticmethod
+    def combine_primary_and_secondary(
+        primary: ClaudeAnalysis,
+        secondary: ClaudeAnalysis,
+    ) -> ClaudeAnalysis:
+        primary_set = set(primary.puertos_ocupados)
+        secondary_set = set(secondary.puertos_ocupados)
+        agreed_occupied = sorted(primary_set.intersection(secondary_set))
+        available = [port for port in range(1, 9) if port not in agreed_occupied]
+        disagreement = primary_set != secondary_set
+
+        observations = primary.observaciones
+        if disagreement:
+            observations = (
+                f"{observations or ''} Secondary review warning: providers "
+                "disagreed; only ports confirmed by both were returned as occupied."
+            ).strip()
+
+        confidence: Confidence = primary.confidence
+        if disagreement:
+            confidence = "low"
+        elif primary.confidence != "high" or secondary.confidence != "high":
+            confidence = "medium"
+
+        return ClaudeAnalysis(
+            total_puertos=8,
+            total_ocupados=len(agreed_occupied),
+            puertos_ocupados=agreed_occupied,
+            total_disponibles=len(available),
+            puertos_disponibles=available,
+            codigo_dispositivo=primary.codigo_dispositivo,
+            ubicacion=primary.ubicacion,
             observaciones=observations,
             confidence=confidence,
         )

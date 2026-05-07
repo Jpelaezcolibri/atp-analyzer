@@ -14,6 +14,14 @@ class Settings(BaseSettings):
     anthropic_model: str = Field("claude-opus-4-5", alias="ANTHROPIC_MODEL")
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
     openai_model: str = Field("gpt-5.1", alias="OPENAI_MODEL")
+    secondary_llm_provider: Literal["none", "anthropic", "openai"] = Field(
+        "none",
+        alias="SECONDARY_LLM_PROVIDER",
+    )
+    secondary_review_on_low_confidence_only: bool = Field(
+        True,
+        alias="SECONDARY_REVIEW_ON_LOW_CONFIDENCE_ONLY",
+    )
     analysis_passes: int = Field(2, ge=1, le=5, alias="ANALYSIS_PASSES")
     production_analysis_passes: int = Field(
         1,
@@ -38,6 +46,17 @@ class Settings(BaseSettings):
             raise ValueError("ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic")
         if self.llm_provider == "openai" and not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+        if (
+            self.secondary_llm_provider == "anthropic"
+            and not self.anthropic_api_key
+        ):
+            raise ValueError(
+                "ANTHROPIC_API_KEY is required when SECONDARY_LLM_PROVIDER=anthropic"
+            )
+        if self.secondary_llm_provider == "openai" and not self.openai_api_key:
+            raise ValueError(
+                "OPENAI_API_KEY is required when SECONDARY_LLM_PROVIDER=openai"
+            )
         return self
 
 
